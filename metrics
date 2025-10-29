@@ -1,0 +1,121 @@
+import os
+import re
+import numpy as np
+import librosa
+import matplotlib.pyplot as plt
+import torch
+from torchmetrics.audio import PerceptualEvaluationSpeechQuality as PESQ
+from torchmetrics.audio import ShortTimeObjectiveIntelligibility as STOI
+
+#Corrected Paths
+CLEAN_PATH = r"C:\Users\Saichandan 09\Documents\MATLAB\Speech_denoising\WaveNet_PyTorch-master\data\NSDTSEA\clean_speech"
+DENOISED_PATH = r"C:\Users\Saichandan 09\Documents\MATLAB\Speech_denoising\WaveNet_PyTorch-master\data\NSDTSEA\samples\samples_1"
+
+#Load all denoised files with `_denoisedclean.wav`
+denoised_files = [f for f in os.listdir(DENOISED_PATH) if f.endswith("_denoisedclean.wav")]
+
+# Lists to store metrics
+sig_scores, bak_scores, ovl_scores, pesq_scores, stoi_scores, filenames = [], [], [], [], [], []
+
+#Load PESQ & STOI models (Use Wideband mode for 16kHz)
+pesq_metric = PESQ(16000, "wb")
+stoi_metric = STOI(16000, False)
+
+def get_clean_filename(denoised_filename):
+    """Extract the corresponding clean filename from the denoised filename."""
+    base_match = re.match(r"(p\d+_\d+)_noise_denoisedclean", denoised_filename)
+    if base_match:
+        base_name = base_match.group(1)
+        return f"{base_name}_clean.wav"
+    return None
+
+def compute_metrics(clean_file, denoised_file, sample_rate=16000):
+    """ Compute PESQ, STOI, SIG, BAK, OVL for a denoised audio file using torchmetrics. """
+    
+    print(f"🔍 Checking files:\n  - Clean: {clean_file}\n  - Denoised: {denoised_file}")
+
+    if not os.path.exists(clean_file):
+        print(f" ERROR: Clean file not found at {clean_file}")
+        return None
+    if not os.path.exists(denoised_file):
+        print(f"ERROR: Denoised file not found at {denoised_file}")
+        return None
+
+    # Load audio files
+    clean_audio, _ = librosa.load(clean_file, sr=sample_rate, mono=True)
+    denoised_audio, _ = librosa.load(denoised_file, sr=sample_rate, mono=True)
+
+    # Ensure same length
+    min_length = min(len(clean_audio), len(denoised_audio))
+    clean_audio = clean_audio[:min_length]
+    denoised_audio = denoised_audio[:min_length]
+
+    # Convert to PyTorch tensors
+    clean_tensor = torch.tensor(clean_audio, dtype=torch.float32).unsqueeze(0)
+    denoised_tensor = torch.tensor(denoised_audio, dtype=torch.float32).unsqueeze(0)
+
+    # Compute PESQ & STOI using torchmetrics
+    try:
+        pesq_score = pesq_metric(denoised_tensor, clean_tensor).item()
+    except Exception as e:
+        print(f"PESQ Error: {e}")
+        pesq_score = np.nan
+
+    try:
+        stoi_score = stoi_metric(denoised_tensor, clean_tensor).item()
+    except Exception as e:
+        print(f"STOI Error: {e}")
+        stoi_score = np.nan
+
+    # Estimate SIG, BAK, OVL
+    sig = np.clip(4.5 * (pesq_score / 4.5) + 1.0 * (stoi_score), 1, 5) if not np.isnan(pesq_score) else np.nan
+    bak = np.clip(4.5 * (pesq_score / 4.5) - 0.5 * (stoi_score), 1, 5) if not np.isnan(pesq_score) else np.nan
+    ovl = np.clip(0.5 * sig + 0.5 * bak, 1, 5) if not np.isnan(pesq_score) else np.nan
+
+    print(f" Metrics for {denoised_file}: SIG={sig:.2f}, BAK={bak:.2f}, OVL={ovl:.2f}, PESQ={pesq_score:.2f}, STOI={stoi_score:.2f}")
+    
+    return sig, bak, ovl, pesq_score, stoi_score
+
+#  Process each denoised file
+for denoised_file in denoised_files:
+    clean_filename = get_clean_filename(denoised_file)
+    if clean_filename:
+        clean_file_path = os.path.join(CLEAN_PATH, clean_filename)
+        denoised_file_path = os.path.join(DENOISED_PATH, denoised_file)
+        
+        #  Compute metrics if clean file exists
+        metrics = compute_metrics(clean_file_path, denoised_file_path)
+
+        if metrics:
+            sig, bak, ovl, pesq, stoi = metrics
+            sig_scores.append(sig)
+            bak_scores.append(bak)
+            ovl_scores.append(ovl)
+            pesq_scores.append(pesq)
+            stoi_scores.append(stoi)
+            filenames.append(denoised_file)
+
+#  Plot Metrics
+def plot_metrics(sig_scores, bak_scores, ovl_scores, pesq_scores, stoi_scores, filenames):
+    """ Plot speech quality metrics for only `_clean.wav` and `_denoisedclean.wav`. """
+    plt.figure(figsize=(12, 6))
+
+    plt.plot(filenames, sig_scores, marker='o', label='SIG')
+    plt.plot(filenames, bak_scores, marker='s', label='BAK')
+    plt.plot(filenames, ovl_scores, marker='^', label='OVL')
+    plt.plot(filenames, pesq_scores, marker='*', label='PESQ')
+    plt.plot(filenames, stoi_scores, marker='x', label='STOI')
+    
+    plt.xlabel("Files")
+    plt.ylabel("Scores")
+    plt.title("Speech Enhancement Metrics (Clean vs. Denoised)")
+    plt.legend()
+    plt.xticks(range(len(filenames)), filenames, rotation=45, fontsize=8)
+    plt.grid()
+    plt.show()
+
+# Plot results
+if filenames:
+    plot_metrics(sig_scores, bak_scores, ovl_scores, pesq_scores, stoi_scores, filenames)
+else:
+    print(" No matching clean files found for processing!")
